@@ -1,33 +1,52 @@
 import os
 import torchvision
+import torch
+from transformers import DetrForObjectDetection, DetrImageProcessor
+from torch.utils.data import DataLoader
+import argparse
+import pytorch_lightning as pl
+from transformers import DetrForObjectDetection
+from pytorch_lightning import Trainer
+from coco_eval import CocoEvaluator
+from tqdm import tqdm
+from utils import prepare_for_coco_detection
 
 
-# settings
-import os
-HOME = os.getcwd()
-path_data = 'football-players-detection-1'
+ap = argparse.ArgumentParser()
+ap.add_argument("-i", "--data", type=str, required=True,
+                help="path to data dir")
+ap.add_argument("-n", "--name", type=str,
+                help="Checkpoint dir name")
+ap.add_argument("-b", "--batch", type=int, default=4,
+                help="Training batch size")
+ap.add_argument("-e", "--epoch", type=int, default=100,
+                help="Training number of epochs")
+ap.add_argument("-m", "--model", type=str, default='facebook/detr-resnet-50',
+                help="pre trained model (eg: detr-resnet-50)")
+ap.add_argument("-c", "--conf", type=float, default=0.5,
+                help="Confidence Threshold")
+ap.add_argument("-u", "--iou", type=float, default=0.8,
+                help="IOU Threshold")
+
+args = vars(ap.parse_args())
+
+
+
+path_data = args['data']
 ANNOTATION_FILE_NAME = "_annotations.coco.json"
 TRAIN_DIRECTORY = os.path.join(path_data, "train")
 VAL_DIRECTORY = os.path.join(path_data, "valid")
 TEST_DIRECTORY = os.path.join(path_data, "test")
 
-
-import torch
-from transformers import DetrForObjectDetection, DetrImageProcessor
-
-
 # settings
 DEVICE = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
-CHECKPOINT = 'facebook/detr-resnet-50'
-CONFIDENCE_TRESHOLD = 0.5
-IOU_TRESHOLD = 0.8
-BATCH_SIZE = 4
+CHECKPOINT = args['model']
+CONFIDENCE_TRESHOLD = args['conf']
+IOU_TRESHOLD = args['iou']
+BATCH_SIZE = args['batch']
+MAX_EPOCHS = args['epoch']
 
 image_processor = DetrImageProcessor.from_pretrained(CHECKPOINT)
-# model = DetrForObjectDetection.from_pretrained(CHECKPOINT)
-# model.to(DEVICE)
-
-
 
 class CocoDetection(torchvision.datasets.CocoDetection):
     def __init__(
@@ -69,8 +88,6 @@ print("Number of validation examples:", len(VAL_DATASET))
 print("Number of test examples:", len(TEST_DATASET))
 
 
-from torch.utils.data import DataLoader
-
 def collate_fn(batch):
     # DETR authors employ various image sizes during training, making it not possible 
     # to directly batch together images. Hence they pad the images to the biggest 
@@ -90,9 +107,7 @@ VAL_DATALOADER = DataLoader(dataset=VAL_DATASET, collate_fn=collate_fn, batch_si
 TEST_DATALOADER = DataLoader(dataset=TEST_DATASET, collate_fn=collate_fn, batch_size=BATCH_SIZE)
 
 
-import pytorch_lightning as pl
-from transformers import DetrForObjectDetection
-import torch
+
 
 categories = TRAIN_DATASET.coco.cats
 id2label = {k: v['name'] for k,v in categories.items()}
@@ -172,56 +187,17 @@ outputs = model(pixel_values=batch['pixel_values'], pixel_mask=batch['pixel_mask
 
 
 
-from pytorch_lightning import Trainer
-
-# %cd {HOME}
-
-# settings
-MAX_EPOCHS = 1
-
 # pytorch_lightning < 2.0.0
 # trainer = Trainer(gpus=1, max_epochs=MAX_EPOCHS, gradient_clip_val=0.1, accumulate_grad_batches=8, log_every_n_steps=5)
 
 # pytorch_lightning >= 2.0.0
 trainer = Trainer(devices=1, accelerator="gpu", max_epochs=MAX_EPOCHS, gradient_clip_val=0.1, accumulate_grad_batches=8, log_every_n_steps=5)
-
 trainer.fit(model)
-
 model.to(DEVICE)
 
-def convert_to_xywh(boxes):
-    xmin, ymin, xmax, ymax = boxes.unbind(1)
-    return torch.stack((xmin, ymin, xmax - xmin, ymax - ymin), dim=1)
-
-def prepare_for_coco_detection(predictions):
-    coco_results = []
-    for original_id, prediction in predictions.items():
-        if len(prediction) == 0:
-            continue
-
-        boxes = prediction["boxes"]
-        boxes = convert_to_xywh(boxes).tolist()
-        scores = prediction["scores"].tolist()
-        labels = prediction["labels"].tolist()
-
-        coco_results.extend(
-            [
-                {
-                    "image_id": original_id,
-                    "category_id": labels[k],
-                    "bbox": box,
-                    "score": scores[k],
-                }
-                for k, box in enumerate(boxes)
-            ]
-        )
-    return coco_results
 
 
-from coco_eval import CocoEvaluator
-from tqdm import tqdm
 
-import numpy as np
 
 evaluator = CocoEvaluator(coco_gt=TEST_DATASET.coco, iou_types=["bbox"])
 
@@ -246,7 +222,7 @@ evaluator.synchronize_between_processes()
 evaluator.accumulate()
 evaluator.summarize()
 
-MODEL_PATH = os.path.join(HOME, 'custom-model')
+MODEL_PATH = os.path.join(HOME, f"{args['name']}")
 model.model.save_pretrained(MODEL_PATH)
 model = DetrForObjectDetection.from_pretrained(MODEL_PATH)
 model.to(DEVICE)

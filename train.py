@@ -1,20 +1,22 @@
-import os
-import torchvision
-import torch
 from transformers import DetrForObjectDetection, DetrImageProcessor
 from torch.utils.data import DataLoader
-import argparse
 import pytorch_lightning as pl
 from transformers import DetrForObjectDetection
 from pytorch_lightning import Trainer
 from coco_eval import CocoEvaluator
 from tqdm import tqdm
 from utils import prepare_for_coco_detection
+import torchvision
+import torch
+import argparse
+import os
 
 
 ap = argparse.ArgumentParser()
 ap.add_argument("-i", "--data", type=str, required=True,
                 help="path to data dir")
+ap.add_argument("-j", "--anot_json", type=str, default='_annotations.coco.json',
+                help="annotation file name inside data dir")
 ap.add_argument("-n", "--name", type=str,
                 help="Checkpoint dir name")
 ap.add_argument("-b", "--batch", type=int, default=4,
@@ -22,18 +24,16 @@ ap.add_argument("-b", "--batch", type=int, default=4,
 ap.add_argument("-e", "--epoch", type=int, default=100,
                 help="Training number of epochs")
 ap.add_argument("-m", "--model", type=str, default='facebook/detr-resnet-50',
-                help="pre trained model (eg: detr-resnet-50)")
+                help="pre trained model or name (eg: facebook/detr-resnet-50)")
 ap.add_argument("-c", "--conf", type=float, default=0.5,
                 help="Confidence Threshold")
 ap.add_argument("-u", "--iou", type=float, default=0.8,
                 help="IOU Threshold")
-
 args = vars(ap.parse_args())
 
 
-
 path_data = args['data']
-ANNOTATION_FILE_NAME = "_annotations.coco.json"
+ANNOTATION_FILE_NAME = args['anot_json']
 TRAIN_DIRECTORY = os.path.join(path_data, "train")
 VAL_DIRECTORY = os.path.join(path_data, "valid")
 TEST_DIRECTORY = os.path.join(path_data, "test")
@@ -46,8 +46,23 @@ IOU_TRESHOLD = args['iou']
 BATCH_SIZE = args['batch']
 MAX_EPOCHS = args['epoch']
 
-image_processor = DetrImageProcessor.from_pretrained(CHECKPOINT)
+# Desiding model save path
+os.makedirs('runs', exist_ok=True)
+if args['name'] is None:
+    name = 'train'
+else:
+    name = args['name']
+n = 0
+while True:
+    if not os.path.exists(os.path.join('runs', f'{name}{n}')):
+        name = f'{name}{n}'
+        print(f"[INFO] Model will saved in {os.path.join('runs', name)}")
+        break
+    else:
+        n += 1
 
+# COCO Data Loading
+image_processor = DetrImageProcessor.from_pretrained(CHECKPOINT)
 class CocoDetection(torchvision.datasets.CocoDetection):
     def __init__(
         self, 
@@ -83,9 +98,9 @@ TEST_DATASET = CocoDetection(
     image_processor=image_processor, 
     train=False)
 
-print("Number of training examples:", len(TRAIN_DATASET))
-print("Number of validation examples:", len(VAL_DATASET))
-print("Number of test examples:", len(TEST_DATASET))
+print("[INFO] Number of training Dataset:", len(TRAIN_DATASET))
+print("[INFO] Number of validation Dataset:", len(VAL_DATASET))
+print("[INFO] Number of test Dataset:", len(TEST_DATASET))
 
 
 def collate_fn(batch):
@@ -107,8 +122,7 @@ VAL_DATALOADER = DataLoader(dataset=VAL_DATASET, collate_fn=collate_fn, batch_si
 TEST_DATALOADER = DataLoader(dataset=TEST_DATASET, collate_fn=collate_fn, batch_size=BATCH_SIZE)
 
 
-
-
+# Detection Transformer Class
 categories = TRAIN_DATASET.coco.cats
 id2label = {k: v['name'] for k,v in categories.items()}
 
@@ -181,12 +195,10 @@ class Detr(pl.LightningModule):
     
 
 model = Detr(lr=1e-4, lr_backbone=1e-5, weight_decay=1e-4)
-
 batch = next(iter(TRAIN_DATALOADER))
 outputs = model(pixel_values=batch['pixel_values'], pixel_mask=batch['pixel_mask'])
 
-
-
+# Train DETR
 # pytorch_lightning < 2.0.0
 # trainer = Trainer(gpus=1, max_epochs=MAX_EPOCHS, gradient_clip_val=0.1, accumulate_grad_batches=8, log_every_n_steps=5)
 
@@ -195,13 +207,13 @@ trainer = Trainer(devices=1, accelerator="gpu", max_epochs=MAX_EPOCHS, gradient_
 trainer.fit(model)
 model.to(DEVICE)
 
+# Save Model
+model.model.save_pretrained(os.path.join('runs', name))
+print(f"[INFO] Model Saved in {os.path.join('runs', name)}")
 
-
-
-
+# Model COCO Evaluater 
 evaluator = CocoEvaluator(coco_gt=TEST_DATASET.coco, iou_types=["bbox"])
-
-print("Running evaluation...")
+print("[INFO] Running evaluation...")
 
 for idx, batch in enumerate(tqdm(TEST_DATALOADER)):
     pixel_values = batch["pixel_values"].to(DEVICE)
@@ -221,8 +233,3 @@ for idx, batch in enumerate(tqdm(TEST_DATALOADER)):
 evaluator.synchronize_between_processes()
 evaluator.accumulate()
 evaluator.summarize()
-
-MODEL_PATH = os.path.join(HOME, f"{args['name']}")
-model.model.save_pretrained(MODEL_PATH)
-model = DetrForObjectDetection.from_pretrained(MODEL_PATH)
-model.to(DEVICE)

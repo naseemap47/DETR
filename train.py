@@ -21,6 +21,7 @@ DEVICE = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 CHECKPOINT = 'facebook/detr-resnet-50'
 CONFIDENCE_TRESHOLD = 0.5
 IOU_TRESHOLD = 0.8
+BATCH_SIZE = 4
 
 image_processor = DetrImageProcessor.from_pretrained(CHECKPOINT)
 # model = DetrForObjectDetection.from_pretrained(CHECKPOINT)
@@ -84,9 +85,9 @@ def collate_fn(batch):
         'labels': labels
     }
 
-TRAIN_DATALOADER = DataLoader(dataset=TRAIN_DATASET, collate_fn=collate_fn, batch_size=4, shuffle=True)
-VAL_DATALOADER = DataLoader(dataset=VAL_DATASET, collate_fn=collate_fn, batch_size=4)
-TEST_DATALOADER = DataLoader(dataset=TEST_DATASET, collate_fn=collate_fn, batch_size=4)
+TRAIN_DATALOADER = DataLoader(dataset=TRAIN_DATASET, collate_fn=collate_fn, batch_size=BATCH_SIZE, shuffle=True)
+VAL_DATALOADER = DataLoader(dataset=VAL_DATASET, collate_fn=collate_fn, batch_size=BATCH_SIZE)
+TEST_DATALOADER = DataLoader(dataset=TEST_DATASET, collate_fn=collate_fn, batch_size=BATCH_SIZE)
 
 
 import pytorch_lightning as pl
@@ -176,7 +177,7 @@ from pytorch_lightning import Trainer
 # %cd {HOME}
 
 # settings
-MAX_EPOCHS = 50
+MAX_EPOCHS = 1
 
 # pytorch_lightning < 2.0.0
 # trainer = Trainer(gpus=1, max_epochs=MAX_EPOCHS, gradient_clip_val=0.1, accumulate_grad_batches=8, log_every_n_steps=5)
@@ -186,6 +187,7 @@ trainer = Trainer(devices=1, accelerator="gpu", max_epochs=MAX_EPOCHS, gradient_
 
 trainer.fit(model)
 
+model.to(DEVICE)
 
 def convert_to_xywh(boxes):
     xmin, ymin, xmax, ymax = boxes.unbind(1)
@@ -217,7 +219,7 @@ def prepare_for_coco_detection(predictions):
 
 
 from coco_eval import CocoEvaluator
-from tqdm.notebook import tqdm
+from tqdm import tqdm
 
 import numpy as np
 
@@ -243,7 +245,6 @@ for idx, batch in enumerate(tqdm(TEST_DATALOADER)):
 evaluator.synchronize_between_processes()
 evaluator.accumulate()
 evaluator.summarize()
-
 
 MODEL_PATH = os.path.join(HOME, 'custom-model')
 model.model.save_pretrained(MODEL_PATH)
